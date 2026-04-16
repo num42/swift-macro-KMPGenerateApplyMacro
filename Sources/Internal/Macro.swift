@@ -12,7 +12,7 @@ public struct GenerateApplyMacro: DeclarationMacro {
       case .missingState:
         "#GenerateApply requires a state type name as its first argument"
       case .invalidProperty(let str):
-        "Invalid property format '\(str)'. Expected 'name: Type'."
+        "Invalid property format '\(str)'. Expected (\"name\", Type.self)."
       }
     }
   }
@@ -65,20 +65,32 @@ public struct GenerateApplyMacro: DeclarationMacro {
   ) throws -> [Property] {
     try arguments.map { arg in
       guard
-        let stringLiteral = arg.expression.as(StringLiteralExprSyntax.self),
+        let tuple = arg.expression.as(TupleExprSyntax.self),
+        tuple.elements.count == 2
+      else {
+        throw Error.invalidProperty(arg.expression.trimmedDescription)
+      }
+
+      let elements = Array(tuple.elements)
+
+      guard
+        let stringLiteral = elements[0].expression.as(StringLiteralExprSyntax.self),
         let segment = stringLiteral.segments.first?.as(StringSegmentSyntax.self)
       else {
         throw Error.invalidProperty(arg.expression.trimmedDescription)
       }
 
-      let text = segment.content.text
-      let parts = text.split(separator: ":", maxSplits: 1)
-      guard parts.count == 2 else {
-        throw Error.invalidProperty(text)
+      let name = segment.content.text
+
+      guard
+        let memberAccess = elements[1].expression.as(MemberAccessExprSyntax.self),
+        memberAccess.declName.baseName.text == "self",
+        let base = memberAccess.base
+      else {
+        throw Error.invalidProperty(arg.expression.trimmedDescription)
       }
 
-      let name = String(parts[0])
-      let type = String(parts[1].drop(while: { $0.isWhitespace }))
+      let type = base.trimmedDescription
       let isOptional = type.hasSuffix("?")
 
       return Property(name: name, type: type, isOptional: isOptional)

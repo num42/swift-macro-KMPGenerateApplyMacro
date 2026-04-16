@@ -1,1 +1,1 @@
-#GenerateApply(MyState.self, "name: String", "trigger: Trigger?")
+#GenerateApply(MyState.self, ("name", String.self), ("trigger", Trigger?.self))

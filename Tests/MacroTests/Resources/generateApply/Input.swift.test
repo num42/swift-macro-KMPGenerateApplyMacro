@@ -1,1 +1,1 @@
-#GenerateApply(MyState.self, "name: String", "count: Int")
+#GenerateApply(MyState.self, ("name", String.self), ("count", Int.self))
