@@ -2,68 +2,117 @@ public import SwiftSyntax
 internal import SwiftSyntaxBuilder
 public import SwiftSyntaxMacros
 
-public struct GenerateApplyMacro: PeerMacro {
+public struct GenerateApplyMacro: MemberMacro {
   enum Error: Swift.Error, CustomStringConvertible {
-    case notAFunction
-    case notInExtension
+    case notAnExtension
+    case invalidProperty(String)
 
     var description: String {
       switch self {
-      case .notAFunction:
-        "@GenerateApply can only be applied to a function"
-      case .notInExtension:
-        "@GenerateApply must be used inside an extension"
+      case .notAnExtension:
+        "@GenerateApply must be applied to an extension"
+      case .invalidProperty(let str):
+        "Invalid property format '\(str)'. Expected 'name: Type'."
       }
+    }
+  }
+
+  struct Property {
+    let name: String
+    let type: String
+    let isOptional: Bool
+
+    var baseType: String {
+      isOptional ? String(type.dropLast()) : type
     }
   }
 
   public static func expansion(
     of node: AttributeSyntax,
-    providingPeersOf declaration: some DeclSyntaxProtocol,
+    providingMembersOf declaration: some DeclGroupSyntax,
+    conformingTo protocols: [TypeSyntax],
     in context: some MacroExpansionContext
   ) throws -> [DeclSyntax] {
-    guard let funcDecl = declaration.as(FunctionDeclSyntax.self) else {
-      throw Error.notAFunction
-    }
-
-    // Get enclosing type name from lexical context
-    guard
-      let extensionDecl = context.lexicalContext.first(
-        where: { $0.as(ExtensionDeclSyntax.self) != nil }
-      )?.as(ExtensionDeclSyntax.self)
-    else {
-      throw Error.notInExtension
+    guard let extensionDecl = declaration.as(ExtensionDeclSyntax.self) else {
+      throw Error.notAnExtension
     }
 
     let typeName = extensionDecl.extendedType.trimmedDescription
-    let parameters = funcDecl.signature.parameterClause.parameters
+    let properties = try parseProperties(from: node)
 
-    var caseLines: [String] = []
+    let withFunc = generateWithFunction(properties: properties)
+    let applyFunc = generateApplyFunction(typeName: typeName, properties: properties)
 
-    for param in parameters {
-      let name = param.firstName.text
+    return [DeclSyntax(stringLiteral: withFunc), DeclSyntax(stringLiteral: applyFunc)]
+  }
 
-      guard let optionalType = param.type.as(OptionalTypeSyntax.self) else {
-        continue
+  private static func parseProperties(from node: AttributeSyntax) throws -> [Property] {
+    guard let arguments = node.arguments?.as(LabeledExprListSyntax.self) else {
+      return []
+    }
+
+    return try arguments.map { arg in
+      guard
+        let stringLiteral = arg.expression.as(StringLiteralExprSyntax.self),
+        let segment = stringLiteral.segments.first?.as(StringSegmentSyntax.self)
+      else {
+        throw Error.invalidProperty(arg.expression.trimmedDescription)
       }
 
-      let innerType = optionalType.wrappedType
+      let text = segment.content.text
+      let parts = text.split(separator: ":", maxSplits: 1)
+      guard parts.count == 2 else {
+        throw Error.invalidProperty(text)
+      }
 
-      if isClosureWrapped(innerType) {
-        let baseType = extractClosureReturnBaseType(innerType)
-        caseLines.append("    case \\KTStateWrapper<State>.kt.\(name):")
-        caseLines.append("      with(\(name): { value as? \(baseType) })")
+      let name = String(parts[0])
+      let type = String(parts[1].drop(while: { $0.isWhitespace }))
+      let isOptional = type.hasSuffix("?")
+
+      return Property(name: name, type: type, isOptional: isOptional)
+    }
+  }
+
+  private static func generateWithFunction(properties: [Property]) -> String {
+    let params = properties.map { prop in
+      if prop.isOptional {
+        "\(prop.name): (() -> \(prop.type))? = nil"
       } else {
-        let baseType = innerType.trimmedDescription
-        caseLines.append("    case \\KTStateWrapper<State>.kt.\(name):")
-        caseLines.append("      with(\(name): value as? \(baseType))")
+        "\(prop.name): \(prop.type)? = nil"
+      }
+    }.joined(separator: ", ")
+
+    let bodyArgs = properties.map { prop in
+      if prop.isOptional {
+        "\(prop.name): \(prop.name) != nil ? \(prop.name)!() : self.\(prop.name)"
+      } else {
+        "\(prop.name): \(prop.name) ?? self.\(prop.name)"
+      }
+    }.joined(separator: ", ")
+
+    return """
+      func with(\(params)) -> Self {
+        Self(\(bodyArgs))
+      }
+      """
+  }
+
+  private static func generateApplyFunction(typeName: String, properties: [Property]) -> String {
+    var caseLines: [String] = []
+
+    for prop in properties {
+      caseLines.append("    case \\KTStateWrapper<State>.kt.\(prop.name):")
+      if prop.isOptional {
+        caseLines.append("      with(\(prop.name): { value as? \(prop.baseType) })")
+      } else {
+        caseLines.append("      with(\(prop.name): value as? \(prop.type))")
       }
     }
 
     let casesStr = caseLines.joined(separator: "\n")
     let fatalLine = #"fatalError("Unknown key path \(path)")"#
 
-    let funcStr = """
+    return """
       func apply(path: AnyKeyPath, value: Any) -> Self {
         typealias State = \(typeName)
 
@@ -74,49 +123,5 @@ public struct GenerateApplyMacro: PeerMacro {
         }
       }
       """
-
-    return [DeclSyntax(stringLiteral: funcStr)]
-  }
-
-  /// Checks if a type is a closure type like `(() -> SomeType?)`
-  private static func isClosureWrapped(_ type: TypeSyntax) -> Bool {
-    if let tupleType = type.as(TupleTypeSyntax.self),
-      tupleType.elements.count == 1,
-      let element = tupleType.elements.first,
-      element.type.is(FunctionTypeSyntax.self)
-    {
-      return true
-    }
-
-    if type.is(FunctionTypeSyntax.self) {
-      return true
-    }
-
-    return false
-  }
-
-  /// Extracts the base return type from `(() -> SomeType?)` → `SomeType`
-  private static func extractClosureReturnBaseType(_ type: TypeSyntax) -> String {
-    var funcType: FunctionTypeSyntax?
-
-    if let tupleType = type.as(TupleTypeSyntax.self),
-      tupleType.elements.count == 1,
-      let element = tupleType.elements.first,
-      let ft = element.type.as(FunctionTypeSyntax.self)
-    {
-      funcType = ft
-    } else if let ft = type.as(FunctionTypeSyntax.self) {
-      funcType = ft
-    }
-
-    guard let funcType else { return type.trimmedDescription }
-
-    let returnType = funcType.returnClause.type
-
-    if let optionalReturn = returnType.as(OptionalTypeSyntax.self) {
-      return optionalReturn.wrappedType.trimmedDescription
-    }
-
-    return returnType.trimmedDescription
   }
 }
