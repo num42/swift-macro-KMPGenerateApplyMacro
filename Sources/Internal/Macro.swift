@@ -2,7 +2,7 @@ public import SwiftSyntax
 internal import SwiftSyntaxBuilder
 public import SwiftSyntaxMacros
 
-public struct GenerateApplyMacro: DeclarationMacro {
+public struct GenerateKMPStateSupportMacro: DeclarationMacro {
   enum Error: Swift.Error, CustomStringConvertible {
     case missingState
     case invalidProperty(String)
@@ -10,7 +10,7 @@ public struct GenerateApplyMacro: DeclarationMacro {
     var description: String {
       switch self {
       case .missingState:
-        "#GenerateApply requires a state type name as its first argument"
+        "#GenerateKMPStateSupport requires a state type name as its first argument"
       case .invalidProperty(let str):
         "Invalid property format '\(str)'. Expected (\\Type.property, Type.self)."
       }
